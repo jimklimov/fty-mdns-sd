@@ -39,6 +39,7 @@ matrix:
       apt:
         packages:
         - valgrind
+        - libavahi-client-dev
   - env: BUILD_TYPE=valgrind CI_CZMQ_VER=4
     os: linux
     dist: trusty
