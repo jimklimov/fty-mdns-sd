@@ -1,24 +1,24 @@
 /*
  *   =========================================================================
  *    Copyright (C) 2014 - 2017 Eaton
- * 
+ *
  *    This program is free software; you can redistribute it and/or modify
  *     it under the terms of the GNU General Public License as published by
  *    the Free Software Foundation; either version 2 of the License, or
  *    (at your option) any later version.
- * 
+ *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  *    GNU General Public License for more details.
- * 
+ *
  *    You should have received a copy of the GNU General Public License along
  *    with this program; if not, write to the Free Software Foundation, Inc.,
  *    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  *   =========================================================================
  */
 
-/* 
+/*
  * File:   avahi_wrapper.cc
  * Author: Xavier Millieret <XavierMillieret@Eaton.com>
  *
@@ -27,7 +27,7 @@
 #include "avahi_wrapper.h"
 #include <czmq.h>
 
-AvahiWrapper::~AvahiWrapper() 
+AvahiWrapper::~AvahiWrapper()
 {
     // Free all resources.
     stop();
@@ -35,8 +35,8 @@ AvahiWrapper::~AvahiWrapper()
     if (_serviceName) avahi_free(_serviceName);
 }
 
-std::string 
-AvahiWrapper::getServiceName(const std::string &service_name,const std::string &uuid) 
+std::string
+AvahiWrapper::getServiceName(const std::string &service_name,const std::string &uuid)
 {
     std::ostringstream buffer;
     buffer << service_name << " ("<< uuid.substr(0, uuid.find("-")) << ")";
@@ -47,63 +47,56 @@ void AvahiWrapper::setServiceDefinition(
     const std::string& service_name,
     const std::string& service_type,
     const std::string& service_stype,
-    const std::string& port,
-    const std::string& uuid)
+    const std::string& port)
 {
-    _serviceName = avahi_strdup_printf("%s", getServiceName(service_name,uuid).c_str());
+    _serviceName = avahi_strdup( service_name.c_str());
     _serviceDefinition[SERVICE_TYPE_KEY]    = std::string(service_type);
     _serviceDefinition[SERVICE_SUBTYPE_KEY] = std::string(service_stype);
     _serviceDefinition[SERVICE_PORT_KEY]    = std::string(port);
-    
 }
 
-void AvahiWrapper::setTxtRecords(char* key, char*value) 
+void AvahiWrapper::clearTxtRecords()
+{
+    if (_txtRecords) avahi_string_list_free(_txtRecords);
+    _txtRecords = NULL;
+}
+
+void AvahiWrapper::setTxtRecord(const char* key, const char*value)
 {
     std::string _key = std::string(key);
     std::string _value = std::string(value);
     _txtRecords = avahi_string_list_add(_txtRecords, (_key + "=" + _value).c_str());
     zsys_info("avahi_string_list_add(TXT %s)",(_key + "=" + _value).c_str());
-    
+
 }
-/*TODO : rework it
-int AvahiWrapper::publishTxtRecords(map_string_t& properties) 
+
+void AvahiWrapper::setTxtRecords(map_string_t &map)
 {
-        
-    //if (_txtRecords) avahi_string_list_free(_txtRecords);
-    AvahiStringList* updttxtRecords = nullptr;
-    // Set all txt records.
-    for (map_string_t::iterator it = properties.begin(); it != properties.end(); ++it) {
-        updttxtRecords = avahi_string_list_add(updttxtRecords, (it->first + "=" + it->second).c_str());
-        zsys_info("avahi_string_list_add(TXT %s)",(it->first + "=" + it->second).c_str());
+    clearTxtRecords ();
+    for (auto it: map) {
+        setTxtRecord (it.first.c_str (), it.second.c_str ());
     }
-    int rv = 0;
-    if(_group){
-        rv = avahi_entry_group_update_service_txt_strlst(_group,
-                AVAHI_IF_UNSPEC,
-                AVAHI_PROTO_UNSPEC,
-                AvahiPublishFlags(0),
-                _serviceName,
-                _serviceDefinition[SERVICE_TYPE_KEY].c_str(),
-                nullptr, 
-                updttxtRecords);
-        if(rv<0){
-            zsys_error( "avahi_entry_group_update_service_txt_strlst Failed %s",
-                    avahi_strerror(rv));;
-        }else{
-            if (_txtRecords) avahi_string_list_free(_txtRecords);
-            _txtRecords=updttxtRecords;
-            zsys_debug("avahi_entry_group_update_service_txt_strlst OK");
-        }
-    }
-    return rv;
 }
-*/
+
+void AvahiWrapper::setTxtRecords(zhash_t *map)
+{
+    if (!map) return;
+    clearTxtRecords ();
+    char *value = (char *) zhash_first (map);
+    while (value) {
+        const char *key = (char *) zhash_cursor (map);
+        setTxtRecord (key, value);
+        value = (char *) zhash_next (map);
+    }
+}
+
+
 void AvahiWrapper::setHostName(const std::string& name)
 {
     avahi_client_set_host_name(_client, name.c_str());
 }
 
-int AvahiWrapper::start() 
+int AvahiWrapper::start()
 {
     int error = 0;
     /* Allocate main loop object */
@@ -114,7 +107,7 @@ int AvahiWrapper::start()
     return error;
 }
 
-void AvahiWrapper::stop() 
+void AvahiWrapper::stop()
 {
     if (_group) {
         avahi_entry_group_reset( _group );
@@ -125,11 +118,11 @@ void AvahiWrapper::stop()
     _group = nullptr;
     _client = nullptr;
     _simplePoll=nullptr;
-    
-    
+
+
 }
 
-void AvahiWrapper::printError(const std::string& msg, const char* errorNo) 
+void AvahiWrapper::printError(const std::string& msg, const char* errorNo)
 {
     zsys_error("avahi error %s %s", msg.c_str(), errorNo);
     avahi_simple_poll_quit(_simplePoll);
@@ -151,16 +144,16 @@ AvahiEntryGroup* AvahiWrapper::create_service(AvahiClient* client,char* serviceN
     if (avahi_entry_group_is_empty(group)) {
         zsys_info("Adding service: %s,%s,%d," ,
                 serviceName,
-                serviceDefinition[SERVICE_TYPE_KEY].c_str(), 
+                serviceDefinition[SERVICE_TYPE_KEY].c_str(),
                 std::stoi(serviceDefinition[SERVICE_PORT_KEY].c_str()));
-        rv = avahi_entry_group_add_service_strlst(group, 
-            AVAHI_IF_UNSPEC, 
-            AVAHI_PROTO_UNSPEC, 
+        rv = avahi_entry_group_add_service_strlst(group,
+            AVAHI_IF_UNSPEC,
+            AVAHI_PROTO_UNSPEC,
             AvahiPublishFlags(0),
             serviceName,
             serviceDefinition[SERVICE_TYPE_KEY].c_str(),
             nullptr,
-            nullptr, 
+            nullptr,
             std::stoi(serviceDefinition[SERVICE_PORT_KEY].c_str()),
             txtRecords);
         if (rv== AVAHI_ERR_COLLISION) {
@@ -171,18 +164,18 @@ AvahiEntryGroup* AvahiWrapper::create_service(AvahiClient* client,char* serviceN
             avahi_entry_group_reset(group);
             return create_service(client,serviceName,serviceDefinition,txtRecords); //potential deadlock :(
         }
-        // Add subtype 
-        zsys_info("Adding subtype: %s,%s,%s", 
-                serviceName, 
-                serviceDefinition[SERVICE_TYPE_KEY].c_str(), 
-                serviceDefinition[SERVICE_SUBTYPE_KEY].c_str());
-        rv = avahi_entry_group_add_service_subtype(group, 
-                AVAHI_IF_UNSPEC, 
-                AVAHI_PROTO_UNSPEC, 
-                AvahiPublishFlags(0), 
-                serviceName, 
+        // Add subtype
+        zsys_info("Adding subtype: %s,%s,%s",
+                serviceName,
                 serviceDefinition[SERVICE_TYPE_KEY].c_str(),
-                nullptr, 
+                serviceDefinition[SERVICE_SUBTYPE_KEY].c_str());
+        rv = avahi_entry_group_add_service_subtype(group,
+                AVAHI_IF_UNSPEC,
+                AVAHI_PROTO_UNSPEC,
+                AvahiPublishFlags(0),
+                serviceName,
+                serviceDefinition[SERVICE_TYPE_KEY].c_str(),
+                nullptr,
                 serviceDefinition[SERVICE_SUBTYPE_KEY].c_str());
         if (rv<0){
             zsys_error("Failed to add subtype: %s, %s" ,
@@ -201,7 +194,31 @@ AvahiEntryGroup* AvahiWrapper::create_service(AvahiClient* client,char* serviceN
     }
     return group;
 }
-void AvahiWrapper::onClientRunning(AvahiClient* client) 
+
+void AvahiWrapper::update()
+{
+    if (_group == NULL) {
+        zsys_warning ("Update called but service doesnt exist yet!");
+        return;
+    }
+
+    int rv = avahi_entry_group_update_service_txt_strlst(
+        _group,
+        AVAHI_IF_UNSPEC,
+        AVAHI_PROTO_UNSPEC,
+        AvahiPublishFlags(0),
+        _serviceName,
+        _serviceDefinition[SERVICE_TYPE_KEY].c_str(),
+        nullptr, //domain
+        _txtRecords);
+
+    if (rv < 0) {
+        zsys_error("Failed to update service: %s", avahi_strerror (rv));
+    }
+}
+
+
+void AvahiWrapper::onClientRunning(AvahiClient* client)
 {
     try {
         assert(client);
@@ -212,7 +229,7 @@ void AvahiWrapper::onClientRunning(AvahiClient* client)
     }
 }
 
-void AvahiWrapper::clientCallback(AvahiClient* client, AvahiClientState state, void *userdata) 
+void AvahiWrapper::clientCallback(AvahiClient* client, AvahiClientState state, void *userdata)
 {
     try {
         if (userdata != nullptr) {
@@ -250,7 +267,7 @@ void AvahiWrapper::clientCallback(AvahiClient* client, AvahiClientState state, v
     }
 }
 
-void AvahiWrapper::groupCallback(AvahiEntryGroup* group, AvahiEntryGroupState state, void *userdata) 
+void AvahiWrapper::groupCallback(AvahiEntryGroup* group, AvahiEntryGroupState state, void *userdata)
 {
     try {
         if (userdata != nullptr) {
@@ -279,4 +296,8 @@ void AvahiWrapper::groupCallback(AvahiEntryGroup* group, AvahiEntryGroupState st
     catch (std::exception& e) {
         zsys_error(  "groupCallback exception: %s",e.what() );
     }
+}
+
+void avahi_wrapper_test (bool verbose) {
+    printf ("Avahi wrapper test\n");
 }

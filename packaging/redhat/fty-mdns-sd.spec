@@ -53,10 +53,10 @@ BuildRequires:  gcc-c++
 BuildRequires:  zeromq-devel
 BuildRequires:  czmq-devel
 BuildRequires:  malamute-devel
-BuildRequires:  avahi-client-devel
+BuildRequires:  avahi-devel
 BuildRequires:  fty-proto-devel
 BuildRoot:      %{_tmppath}/%{name}-%{version}-build
-# Note: manually edited below
+# Note: manually edited below for run-time installations
 # TODO: generate via zproject
 Requires:       avahi
 
@@ -84,7 +84,7 @@ Requires:       libfty_mdns_sd0 = %{version}
 Requires:       zeromq-devel
 Requires:       czmq-devel
 Requires:       malamute-devel
-Requires:       avahi-client-devel
+Requires:       avahi-devel
 Requires:       fty-proto-devel
 
 %description devel

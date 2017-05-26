@@ -70,6 +70,15 @@ s_set_txt_record(fty_mdns_sd_server_t *self,const char *key,const char *value)
 }
 
 static void
+s_set_txt_records(fty_mdns_sd_server_t *self, zhash_t * map_txt)
+{
+    if(map_txt==NULL) return;
+    if(self->map_txt!=NULL)
+        zhash_destroy (&self->map_txt);
+    self->map_txt = zhash_dup(map_txt);
+}
+
+static void
 s_set_srv_name(fty_mdns_sd_server_t *self,const char *value)
 {
     if(value==NULL) return;
@@ -112,6 +121,7 @@ s_set_srv_stype(fty_mdns_sd_server_t *self,const char *value)
     self->srv_stype = _value;
 
 }
+
 //  --------------------------------------------------------------------------
 //  Create a new fty_mdns_sd_server
 fty_mdns_sd_server_t *
@@ -196,24 +206,191 @@ s_poll_fty_info(fty_mdns_sd_server_t *self)
     zstr_free(&zuuid_reply);
     zuuid_destroy(&uuid);
 
+    char *srv_name  = zmsg_popstr (resp);
+    char *srv_type  = zmsg_popstr (resp);
+    char *srv_stype = zmsg_popstr (resp);
+    char *srv_port  = zmsg_popstr (resp);
+
+    s_set_srv_name(self,srv_name);
+    s_set_srv_type(self,srv_type);
+    s_set_srv_stype(self,srv_stype);
+    s_set_srv_port(self,srv_port);
+
     zframe_t *frame_infos = zmsg_next (resp);
     zhash_t *infos = zhash_unpack(frame_infos);
-
-    s_set_txt_record(self, "uuid",     (char*)zhash_lookup (infos, "uuid"));
-    s_set_txt_record(self, "name",     (char*)zhash_lookup (infos, "name"));
-    s_set_txt_record(self, "model",    (char*)zhash_lookup (infos, "model"));
-    s_set_txt_record(self, "vendor",   (char*)zhash_lookup (infos, "vendor"));
-    s_set_txt_record(self, "serial",   (char*)zhash_lookup (infos, "serial"));
-    s_set_txt_record(self, "location", (char*)zhash_lookup (infos, "location"));
-    s_set_txt_record(self, "path",     (char*)zhash_lookup (infos, "rest_path"));
-
-    s_set_srv_port(self, (char *) zhash_lookup (infos, "rest_port"));
+    s_set_txt_records(self,infos);
 
     zhash_destroy(&infos);
+    zstr_free (&srv_name);
+    zstr_free (&srv_type);
+    zstr_free (&srv_stype);
+    zstr_free (&srv_port);
     zmsg_destroy(&resp);
     zmsg_destroy(&send);
 
     return 0;
+}
+
+//  --------------------------------------------------------------------------
+//  process pipe message
+//  return true means continue, false means TERM
+bool static
+s_handle_pipe(fty_mdns_sd_server_t* self, zmsg_t **message_p)
+{
+    if (! message_p || ! *message_p) return true;
+    zmsg_t *message = *message_p;
+
+    char *command = zmsg_popstr (message);
+    if (!command) {
+        zmsg_destroy (message_p);
+        zsys_warning ("Empty command.");
+        return true;
+    }
+    if (streq(command, "$TERM")) {
+        zsys_info ("Got $TERM");
+        zmsg_destroy (message_p);
+        zstr_free (&command);
+        return false;
+    }
+    else
+    if (streq (command, "VERBOSE")) {
+        self->verbose = true;
+    }
+    else
+    if (streq (command, "CONNECT")) {
+        char *endpoint = zmsg_popstr (message);
+        if (!endpoint)
+            zsys_error ("%s:\tMissing endpoint", self->name);
+        assert (endpoint);
+        int r = mlm_client_connect (self->client, endpoint, 5000, self->name);
+        if (r == -1)
+            zsys_error ("%s:\tConnection to endpoint '%s' failed", self->name, endpoint);
+        zsys_debug("fty-mdns-sd-server: CONNECT %s/%s",endpoint,self->name);
+        zstr_free (&endpoint);
+    }
+    else
+    if (streq (command, "CONSUMER")) {
+        char *stream = zmsg_popstr (message);
+        char *pattern = zmsg_popstr (message);
+        if (stream && pattern) {
+            zsys_debug("fty-mdns-sd-server: CONSUMER [%s,%s]",
+                    stream,pattern) ;
+            int r = mlm_client_set_consumer (self->client, stream, pattern);
+            if (r == -1) {
+                zsys_error ("%s:\tSet consumer to '%s' with pattern '%s' failed", self->name, stream, pattern);
+            }
+        } else {
+            zsys_error ("%s:\tMissing params in CONSUMER command", self->name);
+        }
+        zstr_free (&stream);
+        zstr_free (&pattern);
+    }
+    else
+    if (streq (command, "SET-DEFAULT-SERVICE")) {
+         //set new ones
+        char *name  = zmsg_popstr (message);
+        char *type  = zmsg_popstr (message);
+        char *stype = zmsg_popstr (message);
+        char *port  = zmsg_popstr (message);
+        zsys_debug("fty-mdns-sd-server: SET-DEFAULT-SERVICE [%s,%s,%s,%s]",
+            name,type,stype,port) ;
+        s_set_srv_name(self,name);
+        s_set_srv_type(self,type);
+        s_set_srv_stype(self,stype);
+        s_set_srv_port(self,port);
+        zstr_free(&name);
+        zstr_free(&type);
+        zstr_free(&stype);
+        zstr_free(&port);
+    }
+    else
+    if (streq (command, "SET-DEFAULT-TXT")) {
+        char *key   = zmsg_popstr (message);
+        char *value = zmsg_popstr (message);
+        zsys_debug("fty-mdns-sd-server: SET-DEFAULT-TXT %s=%s",
+            key,value) ;
+         s_set_txt_record(self,key,value);
+        zstr_free(&key);
+        zstr_free(&value);
+    }
+    else
+    if (streq (command, "DO-DEFAULT-ANNOUNCE")) {
+        //free previous value
+        zstr_free (&self->fty_info_command);
+        //get info from fty-info
+        self->fty_info_command = zmsg_popstr (message);
+        zsys_debug("fty-mdns-sd-server: DO-DEFAULT-ANNOUNCE %s",
+                self->fty_info_command);
+        s_poll_fty_info(self);
+        self->service->setServiceDefinition(
+            self->srv_name,
+            self->srv_type,
+            self->srv_stype,
+            self->srv_port);
+        //set all txt properties
+        self->service->setTxtRecords (self->map_txt);
+        self->service->start();
+    }
+    else
+        zsys_warning ("%s:\tUnkown API command=%s, ignoring",
+                self->name, command);
+    zstr_free (&command);
+    zmsg_destroy (&message);
+    return true;
+}
+//  --------------------------------------------------------------------------
+//  process message from ANNOUNCE stream
+void static
+s_handle_stream(fty_mdns_sd_server_t* self, zmsg_t **message_p)
+{
+    zmsg_t *message = *message_p;
+    char *cmd = zmsg_popstr (message);
+
+    if (cmd) {
+        if (streq (cmd, "INFO")) {
+            // this suppose to be an update, service must be created already
+            char *srv_name = zmsg_popstr (message);
+            char *srv_type  = zmsg_popstr (message);
+            char *srv_stype = zmsg_popstr (message);
+            char *srv_port  = zmsg_popstr (message);
+
+            zsys_debug("fty-mdns-sd-server: new ANNOUNCEMENT from %s", srv_name);
+
+            zframe_t *infosframe = zmsg_pop (message);
+            zhash_t *infos = zhash_unpack (infosframe);
+            if (srv_name && srv_type && srv_stype && srv_port && infos) {
+                s_set_srv_name (self, srv_name);
+                s_set_srv_type (self, srv_type);
+                s_set_srv_stype (self, srv_stype);
+                s_set_srv_port (self, srv_port);
+                self->service->setTxtRecords (infos);
+                self->service->update ();
+            } else {
+                zsys_error ("Malformed IPC message received");
+            }
+            zhash_destroy (&infos);
+            zframe_destroy (&infosframe);
+            zstr_free(&srv_type);
+            zstr_free(&srv_stype);
+            zstr_free(&srv_port);
+            zstr_free (&srv_name);
+        }
+        else {
+            zsys_error ("Unknown command %s", cmd);
+        }
+        zstr_free (&cmd);
+    }
+    zmsg_destroy (message_p);
+}
+
+//  --------------------------------------------------------------------------
+//  process message from MAILBOX
+
+void static
+s_handle_mailbox(fty_mdns_sd_server_t* self,zmsg_t **message_p)
+{
+    //nothing to do for now
+    zmsg_destroy (message_p);
 }
 
 //  --------------------------------------------------------------------------
@@ -239,94 +416,22 @@ fty_mdns_sd_server (zsock_t *pipe, void *args)
 
         if (which == pipe) {
             zmsg_t *message = zmsg_recv (pipe);
-            if (!message)
-                break;
-            char *command = zmsg_popstr (message);
-            if (!command) {
-                zsys_warning ("Empty command.");
-                continue;
+            if(! s_handle_pipe (self, &message)) {
+                break; // TERM
             }
-            if (self->verbose)
-                zsys_debug ("actor command=%s", command);
-            if (streq(command, "$TERM")) {
-                zsys_info ("Got $TERM");
-                zstr_free (&command);
-                zmsg_destroy (&message);
-                break;
+            // end of command pipe processing
+        }
+        else if (which == mlm_client_msgpipe (self->client)) {
+            zmsg_t *message = mlm_client_recv (self->client);
+            const char *command = mlm_client_command (self->client);
+            if (streq (command, "STREAM DELIVER")) {
+                s_handle_stream (self, &message);
             }
-            else if (streq (command, "VERBOSE")) {
-                self->verbose = true;
-            }
-            else if (streq (command, "CONNECT")) {
-                char *endpoint = zmsg_popstr (message);
-                 if (!endpoint)
-                    zsys_error ("%s:\tMissing endpoint", self->name);
-                assert (endpoint);
-                int r = mlm_client_connect (self->client, endpoint, 5000, self->name);
-                if (r == -1)
-                    zsys_error ("%s:\tConnection to endpoint '%s' failed", self->name, endpoint);
-                zsys_debug("fty-mdns-sd-server: CONNECT %s/%s",endpoint,self->name);
-                zstr_free (&endpoint);
-            }
-            else if (streq (command, "SET-DEFAULT-SERVICE")) {
-                 //set new ones
-                char *name  = zmsg_popstr (message);
-                char *type  = zmsg_popstr (message);
-                char *stype = zmsg_popstr (message);
-                char *port  = zmsg_popstr (message);
-                zsys_debug("fty-mdns-sd-server: SET-DEFAULT-SERVICE [%s,%s,%s,%s]",
-                    name,type,stype,port) ;
-                s_set_srv_name(self,name);
-                s_set_srv_type(self,type);
-                s_set_srv_stype(self,stype);
-                s_set_srv_port(self,port);
-                zstr_free(&name);
-                zstr_free(&type);
-                zstr_free(&stype);
-                zstr_free(&port);
-
-            }
-            else if (streq (command, "SET-DEFAULT-TXT")) {
-                char *key   = zmsg_popstr (message);
-                char *value = zmsg_popstr (message);
-                zsys_debug("fty-mdns-sd-server: SET-DEFAULT-TXT %s=%s",
-                    key,value) ;
-                 s_set_txt_record(self,key,value);
-                zstr_free(&key);
-                zstr_free(&value);
-
-            }
-            else if (streq (command, "DO-DEFAULT-ANNOUNCE")) {
-                //free previous value
-                zstr_free (&self->fty_info_command);
-                //get info from fty-info
-                self->fty_info_command = zmsg_popstr (message);
-                zsys_debug("fty-mdns-sd-server: DO-DEFAULT-ANNOUNCE %s",
-                        self->fty_info_command);
-                s_poll_fty_info(self);
-                self->service->setServiceDefinition(
-                    self->srv_name,
-                    self->srv_type,
-                    self->srv_stype,
-                    self->srv_port,
-                    (char*)zhash_lookup (self->map_txt, "uuid"));
-                //set all txt properties
-                char *value = (char *) zhash_first (self->map_txt);   // first value
-                while ( value != NULL )
-                {
-                    char *key = (char *) zhash_cursor (self->map_txt);   // key of this value
-                    self->service->setTxtRecords (key,value);
-                    value = (char *) zhash_next (self->map_txt);   // next value
-                }
-                self->service->start();
-            }
-
             else
-                zsys_warning ("%s:\tUnkown API command=%s, ignoring", self->name, command);
-            zstr_free (&command);
-            zmsg_destroy (&message);
-        }// end of comand pipe processing
-
+            if (streq (command, "MAILBOX DELIVER")) {
+                s_handle_mailbox (self, &message);
+            }
+        }
     }
 
     self->service->stop();
@@ -354,7 +459,7 @@ fty_mdns_sd_server_test (bool verbose)
 
 
     zstr_sendx (server, "SET-DEFAULT-SERVICE",
-            "IPC","_https._tcp.","_powerservice._sub._https._tcp.","443", NULL);
+            "IPC (12345678)","_https._tcp.","_powerservice._sub._https._tcp.","443", NULL);
     zstr_sendx (server, "SET-DEFAULT-TXT",
             "txtvers","1.0.0",NULL);
 
